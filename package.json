@@ -1,0 +1,48 @@
+{
+  "name": "kupi-mcp",
+  "version": "1.0.0",
+  "description": "Unofficial read-only MCP server for public Kupi.cz sale pages",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "kupi-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "package": "npm run build && node scripts/package.mjs",
+    "branches:refresh": "npm run build && node scripts/branches-refresh.mjs",
+    "privacy:check": "node scripts/privacy-check.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.vercel.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "cheerio": "^1.2.0",
+    "zod": "^4.5.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.3.0",
+    "archiver": "^8.0.0",
+    "eslint": "^10.9.1",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.41.0",
+    "vitest": "^4.1.11"
+  }
+}

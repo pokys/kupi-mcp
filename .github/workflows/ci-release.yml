@@ -1,0 +1,167 @@
+name: CI, package, and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Validate and package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate source
+        run: |
+          npm run format:check
+          npm run privacy:check
+          npm run typecheck
+          npm run lint
+          npm run test
+
+      - name: Build deployable ZIP
+        run: npm run package
+
+      - name: Verify ZIP
+        run: |
+          unzip -t artifacts/*.zip
+          unzip -Z1 artifacts/*.zip | grep -Fx 'package.json'
+          unzip -Z1 artifacts/*.zip | grep -Fx 'vercel.json'
+          unzip -Z1 artifacts/*.zip | grep -Fx 'api/mcp.ts'
+          unzip -Z1 artifacts/*.zip | grep -Fx 'dist/index.js'
+          unzip -Z1 artifacts/*.zip | grep -Fx 'public/robots.txt'
+
+      - name: Verify Vercel drop-in installation
+        run: |
+          mkdir vercel-package-check
+          unzip artifacts/*.zip -d vercel-package-check
+          cd vercel-package-check
+          npm ci
+          npm run build
+          test -f dist/index.js
+          test -f public/robots.txt
+          node --input-type=module -e "await Promise.all([import('@modelcontextprotocol/sdk/server/mcp.js'), import('cheerio'), import('zod')])"
+
+      - name: Upload deployable package
+        uses: actions/upload-artifact@v6
+        with:
+          name: kupi-mcp-${{ github.sha }}
+          path: artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy-vercel:
+    name: Deploy artifact to Vercel
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Download exact build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: kupi-mcp-${{ github.sha }}
+          path: release
+
+      - name: Unpack artifact
+        run: |
+          mkdir deploy-package
+          unzip release/*.zip -d deploy-package
+
+      - name: Deploy prebuilt project
+        if: env.VERCEL_TOKEN != '' && env.VERCEL_ORG_ID != '' && env.VERCEL_PROJECT_ID != ''
+        working-directory: deploy-package
+        run: |
+          npx --yes vercel@59.10.0 pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx --yes vercel@59.10.0 build --prod --token="$VERCEL_TOKEN"
+          npx --yes vercel@59.10.0 deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+
+      - name: Explain skipped deployment
+        if: env.VERCEL_TOKEN == '' || env.VERCEL_ORG_ID == '' || env.VERCEL_PROJECT_ID == ''
+        run: echo "::notice::ZIP was built successfully; Vercel deploy was skipped because one or more Vercel secrets are missing."
+
+  publish-latest:
+    name: Publish latest downloadable ZIP
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download exact build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: kupi-mcp-${{ github.sha }}
+          path: release
+
+      - name: Prepare stable asset names
+        run: |
+          versioned_zip="$(find release -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$versioned_zip"
+          cp "$versioned_zip" release/kupi-mcp.zip
+          cd release
+          sha256sum kupi-mcp.zip > kupi-mcp.zip.sha256
+
+      - name: Create or update rolling GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_notes="Latest successful build of main at commit ${GITHUB_SHA}."
+          if gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true
+            gh release upload latest release/kupi-mcp.zip release/kupi-mcp.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit latest --title "Latest successful build" --notes "$release_notes" --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create latest release/kupi-mcp.zip release/kupi-mcp.zip.sha256 --target "$GITHUB_SHA" --title "Latest successful build" --notes "$release_notes" --latest --repo "$GITHUB_REPOSITORY"
+          fi
+
+  release:
+    name: Publish tagged ZIP
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: kupi-mcp-${{ github.sha }}
+          path: release
+
+      - name: Add stable asset names
+        run: |
+          versioned_zip="$(find release -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$versioned_zip"
+          cp "$versioned_zip" release/kupi-mcp.zip
+          cd release
+          sha256sum kupi-mcp.zip > kupi-mcp.zip.sha256
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/*.zip release/kupi-mcp.zip.sha256 --repo "$GITHUB_REPOSITORY" --generate-notes --latest
