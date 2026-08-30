@@ -165,15 +165,24 @@ export function packageFit(wish: PackageWish | null, label: string | null): Pack
 }
 
 /**
+ * How much a condition we cannot evaluate counts against an offer.
+ *
+ * Deliberately small. A coupon or a "selected branches only" note is a nuisance, not a
+ * disqualification, so it has to settle a tie between equal prices without ever letting a
+ * dearer offer win: at 5%, only a price within 5% can be overtaken.
+ */
+const UNCLEAR_CONDITION_FACTOR = 1.05;
+
+/**
  * The single ranking model.
  *
- *     ranking = purchasePrice × packageFactor
+ *     ranking = purchasePrice × packageFactor × conditionFactor
  *
- * `purchasePrice` is the only real money. The factor is a preference of at least 1 that
- * makes a candidate less attractive without ever changing the price reported.
+ * `purchasePrice` is the only real money. The factors are preferences of at least 1 that
+ * make a candidate less attractive without ever changing the price reported.
  */
-export function rankingCost(purchasePrice: number, fit: PackageFit): number {
-  return purchasePrice * (1 + fit.penalty * 1.5);
+export function rankingCost(purchasePrice: number, fit: PackageFit, unclear = false): number {
+  return purchasePrice * (1 + fit.penalty * 1.5) * (unclear ? UNCLEAR_CONDITION_FACTOR : 1);
 }
 
 function round(value: number): number {

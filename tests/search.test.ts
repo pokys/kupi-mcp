@@ -119,6 +119,61 @@ describe('search', () => {
     expect(result.warnings.join(' ')).toContain('Jiná lokalita');
   });
 
+  it('ranks a discount the leaflet never printed a percentage for', async () => {
+    const items = [
+      {
+        name: 'Máslo levné',
+        slug: 'maslo-levne',
+        packageText: '250 g',
+        regularPrice: 41.26,
+        // 57% off, but the leaflet shows no badge, so discountPercent stays null.
+        rows: [{ store: 'Lidl', price: 17.9 }],
+      },
+      {
+        name: 'Máslo drahé',
+        slug: 'maslo-drahe',
+        packageText: '250 g',
+        regularPrice: 41.26,
+        rows: [{ store: 'Albert', price: 19.9, discountPercent: 50 }],
+      },
+    ];
+
+    const result = await service(items).search({ query: 'máslo', sortBy: 'discount' });
+    // It used to sort last: a missing percentage counted as no discount at all.
+    expect(result.products[0]?.slug).toBe('maslo-levne');
+    // Ordering only — the field itself must not claim a figure the source never gave.
+    expect(result.products[0]?.offers[0]?.discountPercent).toBeNull();
+  });
+
+  it('does not compare a future price with today price for a different pack size', async () => {
+    const items = [
+      {
+        name: 'Máslo',
+        slug: 'maslo',
+        rows: [
+          {
+            store: 'Lidl',
+            price: 25.9,
+            packageText: '250 g',
+            validity: 'platí 1. 9. – 10. 9. 2026',
+          },
+          {
+            store: 'Albert',
+            price: 17.9,
+            packageText: '150 g',
+            validity: 'platí 8. 9. – 14. 9. 2026',
+          },
+        ],
+      },
+    ];
+
+    const result = await service(items).search({ query: 'máslo', validOn: '2026-09-05' });
+    expect(result.upcoming).toHaveLength(1);
+    // 25,90 for 250 g against 17,90 for 150 g is not an 8 Kč saving, so no number is given.
+    expect(result.upcoming[0]?.priceToday).toBeNull();
+    expect(result.upcoming[0]?.savingIfWaiting).toBeNull();
+  });
+
   it('refuses to return data when the page structure is no longer recognised', async () => {
     const client = clientServing('<!doctype html><html><body><p>nic</p></body></html>');
     await expect(new SearchService(client).search({ query: 'máslo' })).rejects.toThrow(

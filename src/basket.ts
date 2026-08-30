@@ -39,6 +39,9 @@ interface Candidate {
   line: Omit<BasketLine, 'query'>;
 }
 
+/** Either a priced candidate or the reason this offer cannot serve the item. */
+type Priced = { ok: true; candidate: Candidate } | { ok: false; reason: string };
+
 interface ItemPlan {
   item: BasketItem;
   candidates: Candidate[];
@@ -49,7 +52,10 @@ interface ItemPlan {
 interface Combination {
   lines: BasketLine[];
   unresolved: Array<{ query: string; reason: string }>;
+  /** The money. This is what gets reported. */
   total: number;
+  /** The decision metric: money plus the preferences. Never reported. */
+  ranking: number;
   chains: Set<string>;
 }
 
@@ -91,9 +97,9 @@ function priceCandidate(
   product: Product,
   offer: Offer,
   population: Array<UnitPrice | null>,
-): Candidate | null {
+): Priced {
   const unitPrice = offer.price;
-  if (unitPrice === null) return null;
+  if (unitPrice === null) return { ok: false, reason: 'Nabídka neuvádí cenu.' };
 
   const pack = parsePackage(offer.packageText) ?? parsePackage(product.packageText);
   const required = requirementOf(item);
@@ -118,8 +124,20 @@ function priceCandidate(
     }
   }
 
+  // A per-person limit caps what this offer can supply. Quoting the promotional price for
+  // more packages than the shop will sell at it is exactly the kind of figure that cannot
+  // be paid at the till, so the offer is refused rather than priced.
+  if (offer.quantityLimit !== null && packages > offer.quantityLimit) {
+    return {
+      ok: false,
+      reason: `Nabídka je omezena na ${offer.quantityLimit} ks na osobu, ale je potřeba ${packages} balení.`,
+    };
+  }
+
   const fit = packageFit(wishOf(item), offer.packageText ?? product.packageText);
-  if (!fit.usable) return null;
+  if (!fit.usable) {
+    return { ok: false, reason: 'Požadovanou velikost balení se nepodařilo najít.' };
+  }
   if (fit.penalty > 0 && item.package) {
     notes.push(
       `Velikost balení neodpovídá požadovaným ${item.package.amount} ${item.package.unit}.`,
@@ -131,22 +149,25 @@ function priceCandidate(
 
   const purchasePrice = money(unitPrice * packages);
   return {
-    product,
-    offer,
-    purchasePrice,
-    packages,
-    ranking: rankingCost(purchasePrice, fit),
-    line: {
+    ok: true,
+    candidate: {
       product,
       offer,
-      packagePrice: unitPrice,
-      packages,
       purchasePrice,
-      ...(pack && pack.count > 1 ? { packCount: pack.count } : {}),
-      ...(requestedQuantity ? { requestedQuantity } : {}),
-      ...(purchasedQuantity ? { purchasedQuantity } : {}),
-      priceSanity: priceSanity(unitPriceOf(offer, product), population),
-      note: notes.length > 0 ? notes.join(' ') : null,
+      packages,
+      ranking: rankingCost(purchasePrice, fit, offer.needsManualCheck),
+      line: {
+        product,
+        offer,
+        packagePrice: unitPrice,
+        packages,
+        purchasePrice,
+        ...(pack && pack.count > 1 ? { packCount: pack.count } : {}),
+        ...(requestedQuantity ? { requestedQuantity } : {}),
+        ...(purchasedQuantity ? { purchasedQuantity } : {}),
+        priceSanity: priceSanity(unitPriceOf(offer, product), population),
+        note: notes.length > 0 ? notes.join(' ') : null,
+      },
     },
   };
 }
@@ -172,6 +193,7 @@ function evaluate(plans: ItemPlan[], chains: string[]): Combination {
   const open = new Set(chains);
   const lines: BasketLine[] = [];
   const unresolved: Array<{ query: string; reason: string }> = [];
+  let ranking = 0;
 
   for (const plan of plans) {
     const available = plan.candidates.filter(
@@ -186,12 +208,14 @@ function evaluate(plans: ItemPlan[], chains: string[]): Combination {
       continue;
     }
     lines.push({ query: plan.item.query, ...best.line });
+    ranking += best.ranking;
   }
 
   return {
     lines,
     unresolved,
     total: money(lines.reduce((sum, line) => sum + line.purchasePrice, 0)),
+    ranking,
     chains: new Set(
       lines.map((line) => comparable(line.offer.store ?? '')).filter((chain) => chain !== ''),
     ),
@@ -201,14 +225,17 @@ function evaluate(plans: ItemPlan[], chains: string[]): Combination {
 /**
  * Coverage outranks price: a cheaper set of shops that leaves items unbought is not a
  * better answer to "buy this list" than a slightly dearer one that covers everything.
+ *
+ * Compares `ranking`, not `total`: two shops charging the same money are not equally good
+ * if one attaches a condition that cannot be checked. `total` stays the reported price.
  */
 function better(candidate: Combination, current: Combination): boolean {
   if (candidate.unresolved.length !== current.unresolved.length) {
     return candidate.unresolved.length < current.unresolved.length;
   }
   return (
-    candidate.total + candidate.chains.size * EXTRA_STORE_CZK <
-    current.total + current.chains.size * EXTRA_STORE_CZK
+    candidate.ranking + candidate.chains.size * EXTRA_STORE_CZK <
+    current.ranking + current.chains.size * EXTRA_STORE_CZK
   );
 }
 
@@ -262,6 +289,8 @@ export class BasketPlanner {
       const population = confident.flatMap((product) =>
         product.offers.map((offer) => unitPriceOf(offer, product)),
       );
+      /** Distinct reasons offers were refused, kept for when none is left. */
+      const blocked = new Set<string>();
 
       const candidates = confident.flatMap((product) =>
         product.offers
@@ -274,17 +303,21 @@ export class BasketPlanner {
               (geography.allowed === null || geography.allowed.has(comparable(offer.store))),
           )
           .flatMap((offer) => {
-            const candidate = priceCandidate(item, product, offer, population);
-            return candidate ? [candidate] : [];
+            const priced = priceCandidate(item, product, offer, population);
+            if (priced.ok) return [priced.candidate];
+            blocked.add(priced.reason);
+            return [];
           }),
       );
 
       const rejection =
-        candidates.length === 0 && confident.length === 0 && products.length > 0
-          ? 'Žádný dostatečně jistý produkt neodpovídá dotazu.'
-          : candidates.length === 0 && confident.length > 0
-            ? 'Požadovanou velikost balení se nepodařilo najít.'
-            : null;
+        candidates.length > 0
+          ? null
+          : confident.length === 0 && products.length > 0
+            ? 'Žádný dostatečně jistý produkt neodpovídá dotazu.'
+            : // The offers' own reasons say far more than a generic message: a per-person
+              // limit and an unavailable package size call for different actions.
+              [...blocked].join(' ') || null;
       return { item, candidates, rejection };
     });
 

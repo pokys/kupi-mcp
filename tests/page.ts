@@ -10,12 +10,16 @@ export interface Row {
   validity?: string;
   note?: string;
   club?: boolean;
+  /** The badge on the leaflet. Many real offers carry none. */
+  discountPercent?: number;
 }
 
 export interface Item {
   name: string;
   slug: string;
   packageText?: string;
+  /** Kupi's "Běžná cena": an average across shops, not any one shop's former price. */
+  regularPrice?: number;
   rows: Row[];
 }
 
@@ -37,6 +41,11 @@ export function page(items: Item[], location = 'Testovací lokalita'): string {
           <strong class="discount_price_value">${row.price.toFixed(2).replace('.', ',')}&nbsp;Kč</strong>
           <div class="discount_amount">/ ${row.packageText ?? item.packageText ?? ''}</div>
           ${row.unitPrice ? `<span class="price_per_unit">${row.unitPrice}</span>` : ''}
+          ${
+            row.discountPercent !== undefined
+              ? `<div class="discount_percentage">–${row.discountPercent}&nbsp;%</div>`
+              : ''
+          }
           <div class="discounts_validity">${row.validity ?? 'platí do 31. 12. 2099'}</div>
           ${row.club ? '<div class="discounts_club">Platí pro členy klubu</div>' : ''}
           ${row.note ? `<div class="discount_note"><span>${row.note}</span></div>` : ''}
@@ -52,6 +61,13 @@ export function page(items: Item[], location = 'Testovací lokalita'): string {
               ${item.packageText ? `<span class="nowrap">${item.packageText}</span>` : ''}
             </h2>
           </div>
+          ${
+            item.regularPrice !== undefined
+              ? `<div class="avg_price">Běžná cena: <span>${item.regularPrice
+                  .toFixed(2)
+                  .replace('.', ',')}</span>&nbsp;Kč</div>`
+              : ''
+          }
         </div>
         <div class="promo_discounts"><div class="product_discounts_overview">${rows}</div></div>
       </div>`;

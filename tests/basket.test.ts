@@ -261,4 +261,73 @@ describe('basket', () => {
     );
     expect(result.stores[0]?.chain).toBe('Albert');
   });
+
+  it('refuses an offer that cannot supply the amount within its per-person limit', async () => {
+    const pages = {
+      máslo: [
+        {
+          name: 'Máslo',
+          slug: 'maslo',
+          packageText: '250 g',
+          rows: [{ store: 'Lidl', price: 17.9, note: 'max 5 ks/osoba/den' }],
+        },
+      ],
+    };
+
+    // 1 kg is four packs, inside the limit of five.
+    const within = await plan(pages, { items: [{ query: 'máslo', amount: 1, unit: 'kg' }] });
+    expect(within.status).toBe('complete');
+    expect(within.stores[0]?.lines[0]?.packages).toBe(4);
+
+    // 2 kg is eight packs, which the shop will not sell at the promotional price.
+    const over = await plan(pages, { items: [{ query: 'máslo', amount: 2, unit: 'kg' }] });
+    expect(over.status).toBe('partial');
+    expect(over.totalPrice).toBeNull();
+    expect(over.unresolved[0]?.reason).toMatch(/omezena na 5 ks/u);
+  });
+
+  it('prefers the offer whose conditions can be checked when the price is the same', async () => {
+    const result = await plan(
+      {
+        'kuřecí prsa': [
+          {
+            name: 'Kuřecí prsa',
+            slug: 'kureci-prsa',
+            packageText: '1 kg',
+            rows: [
+              { store: 'FLOP TOP', price: 149.9, note: 'pouze ve vybraných prodejnách' },
+              { store: 'FLOP', price: 149.9 },
+            ],
+          },
+        ],
+      },
+      { items: [{ query: 'kuřecí prsa' }] },
+    );
+
+    expect(result.stores[0]?.chain).toBe('FLOP');
+    expect(result.stores[0]?.lines[0]?.offer.needsManualCheck).toBe(false);
+  });
+
+  it('still takes a genuinely cheaper offer despite an uncheckable condition', async () => {
+    const result = await plan(
+      {
+        'kuřecí prsa': [
+          {
+            name: 'Kuřecí prsa',
+            slug: 'kureci-prsa',
+            packageText: '1 kg',
+            rows: [
+              { store: 'FLOP TOP', price: 119.9, note: 'pouze ve vybraných prodejnách' },
+              { store: 'FLOP', price: 149.9 },
+            ],
+          },
+        ],
+      },
+      { items: [{ query: 'kuřecí prsa' }] },
+    );
+
+    // The condition is a nuisance, not a disqualification: 20% cheaper still wins.
+    expect(result.stores[0]?.chain).toBe('FLOP TOP');
+    expect(result.stores[0]?.lines[0]?.note).toMatch(/nelze vyhodnotit/u);
+  });
 });

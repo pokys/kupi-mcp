@@ -42,15 +42,24 @@ function upcomingOffers(
   for (const product of products) {
     if (score(query, product.name, exclude).score < MEDIUM) continue;
 
-    const today = product.offers
-      .filter((offer) => offerValidOn(offer, validOn) && offer.price !== null)
-      .map((offer) => offer.price as number);
-    const best = today.length > 0 ? Math.min(...today) : null;
+    // Cheapest price today per package size, not per product. Kupi lists several sizes
+    // under one product, and "wait and save 8 Kč" is false if today's price was for a
+    // 250 g pack and the future one is 400 g.
+    const bestBySize = new Map<string, number>();
+    for (const offer of product.offers) {
+      if (!offerValidOn(offer, validOn) || offer.price === null) continue;
+      const size = comparable(offer.packageText ?? '');
+      const known = bestBySize.get(size);
+      if (known === undefined || offer.price < known) bestBySize.set(size, offer.price);
+    }
 
     for (const offer of product.offers) {
       if (offer.validFrom === null || offer.validFrom <= validOn) continue;
       const startsInDays = daysBetween(validOn, offer.validFrom);
       if (startsInDays <= 0 || startsInDays > UPCOMING_HORIZON_DAYS) continue;
+      // Null rather than a number derived from a different pack: no comparison is better
+      // than one the caller cannot tell is invalid.
+      const best = bestBySize.get(comparable(offer.packageText ?? '')) ?? null;
       upcoming.push({
         product: product.name,
         productUrl: product.productUrl,
@@ -214,6 +223,22 @@ export class SearchService {
   }
 }
 
+/**
+ * A discount to order by, for offers where the leaflet printed no percentage.
+ *
+ * Used for ordering only, never reported: `regularPrice` is Kupi's average across shops,
+ * not this shop's own former price, so publishing a percentage derived from it would
+ * claim precision the source does not have. Leaving such offers unranked is worse than
+ * approximating, though — it sent the cheapest butter of the day to the bottom of the
+ * list purely because its leaflet had no badge.
+ */
+function sortableDiscount(offer: Offer): number | null {
+  if (offer.discountPercent !== null) return offer.discountPercent;
+  if (offer.regularPrice === null || offer.price === null) return null;
+  if (offer.regularPrice <= 0 || offer.price >= offer.regularPrice) return null;
+  return Math.round((1 - offer.price / offer.regularPrice) * 100);
+}
+
 function sort(products: Product[], by: NonNullable<SearchInput['sortBy']>): Product[] {
   const lowest = (values: Array<number | null>): number => {
     const valid = values.filter((value): value is number => value !== null);
@@ -235,8 +260,7 @@ function sort(products: Product[], by: NonNullable<SearchInput['sortBy']>): Prod
     }
     if (by === 'discount') {
       return (
-        highest(right.offers.map((o) => o.discountPercent)) -
-        highest(left.offers.map((o) => o.discountPercent))
+        highest(right.offers.map(sortableDiscount)) - highest(left.offers.map(sortableDiscount))
       );
     }
     return (right.match?.score ?? 0) - (left.match?.score ?? 0);
